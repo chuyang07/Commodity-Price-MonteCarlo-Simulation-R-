@@ -1,0 +1,383 @@
+---
+title: "Commodity Market"
+author: "Chuyang Yu"
+date: "2025-03-22"
+output: word_document
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#spot price scenario
+
+```{r}
+library(dplyr)
+
+library(ggplot2)
+```
+
+```{r}
+#electricity sales revenue
+
+germany_spot<-readxl::read_excel("ycy price.xlsx",sheet = "germany spot") %>%
+  select(Date,`Last Price`) %>%
+  na.omit()
+
+germany_spot<-germany_spot %>%
+  filter(`Last Price`>0)
+```
+
+```{r}
+#log return
+
+germany_spot <- germany_spot %>%
+  mutate(log_return = log(`Last Price` / lag(`Last Price`)))
+
+miu<-mean(germany_spot$log_return, na.rm = TRUE)
+
+sigma<-sd(tail(germany_spot$log_return, 60), na.rm = TRUE)
+
+miu_mo<-miu*(252/12)
+
+sigma_mo<-sigma*sqrt(252/12)
+
+miu
+
+sigma
+
+miu_mo
+
+sigma_mo
+```
+
+```{r}
+#monte carlo
+set.seed(790)
+
+n_simu<-1000
+
+n_mo<-12*10
+
+initial_price <- tail(germany_spot$`Last Price`, 1)
+
+dt<-1/12
+
+simulate_gbm <- function(S0, miu_mo, sigma_mo, dt, steps, n_sim) {
+  paths <- matrix(NA, nrow = steps, ncol = n_simu)
+  paths[1, ] <- S0
+  for (i in 2:steps) {
+    paths[i, ] <- paths[i-1, ] * exp((miu_mo - 0.5 * sigma_mo^2) * dt + sigma_mo * sqrt(dt) * rnorm(n_simu))
+  }
+  return(paths)
+}
+```
+
+```{r}
+simu_price<-simulate_gbm(initial_price, miu_mo, sigma_mo, dt, n_mo, n_simu)
+```
+
+```{r}
+#electricity sales revenue
+
+electr_rev<-simu_price*500
+
+discount_rate<-0.02/12
+
+npv_electr<-colSums(electr_rev / ((1 + discount_rate) ^ (1:n_mo)))
+
+npv_electr <- npv_electr[npv_electr < quantile(npv_electr, 0.95)]
+
+hist(npv_electr, breaks = 50, main = "NPV Distribution (Without Carbon Credit)", xlab = "NPV", col = "skyblue")
+```
+
+```{r}
+#carbon revenue
+
+carbon_spot<-readxl::read_excel("ycy price.xlsx",sheet = "EUA SPOT") %>%
+  select(Date,`Last Price`) %>%
+  na.omit()
+
+carbon_spot<-carbon_spot %>%
+  filter(`Last Price`>0)
+```
+
+```{r}
+#log return
+
+carbon_spot <- carbon_spot %>%
+  mutate(log_return = log(`Last Price` / lag(`Last Price`)))
+         
+miuC <-mean(carbon_spot$log_return, na.rm = TRUE)
+
+sigmaC<-sd(tail(carbon_spot$log_return, 60), na.rm = TRUE)
+
+miu_Cmo<-miu*(252/12)
+
+sigma_Cmo<-sigma*sqrt(252/12)*0.5
+
+miuC
+
+sigmaC
+
+miu_Cmo
+
+sigma_Cmo
+```
+
+```{r}
+#monte carlo for carbon credit
+
+eua_price <- carbon_spot$`Last Price`[nrow(carbon_spot)]
+
+simuC <- matrix(NA, ncol = n_simu, nrow = n_mo)
+
+for (i in 1:n_simu) {
+  simuC[, i] <- eua_price*exp((miu_Cmo - 0.5 * sigma_Cmo^2)*dt+sigma_Cmo * sqrt(dt) * rnorm(n_mo))
+}
+```
+
+```{r}
+#carbon credit revenue
+
+#assume our allocation rate are 20%, 50%, 80% to test different impacts
+
+allo_rates<-c(0,0.2,0.5,0.8)
+
+npv_with_carbon <- list()
+
+for (rate in allo_rates) {
+  carbon_rev <- simuC * (500 * rate)
+  npv_with_carbon[[as.character(rate)]] <- colSums((electr_rev + carbon_rev) / ((1 + discount_rate) ^ (1:n_mo)))
+}
+```
+
+```{r}
+#remove outliers
+npv_with_carbon_filtered <- lapply(npv_with_carbon, function(npv) {
+  npv[npv > quantile(npv, 0.05) & npv < quantile(npv, 0.95)]
+})
+```
+
+
+
+```{r}
+#total revenue with carbon credit in spot price
+
+par(mfrow = c(2, 2))
+
+for (rate in allo_rates) {
+  hist(npv_with_carbon_filtered[[as.character(rate)]], breaks = 50, main = paste0(rate * 100, "% Carbon (Spot)"), col = "lightgreen")
+}
+```
+
+
+#Forward Contract Scenario
+
+```{r}
+#electricity without carbon credit
+
+library(tidyverse)
+
+library(readxl)
+
+germany_forward <- list(
+  "1Y" = read_excel("ycy price.xlsx", sheet = "germany yr1") %>%
+    mutate(Date = as.Date(Date)) %>%
+    select(Date, `Last Price`) %>%
+    arrange(Date) %>%
+    na.omit(),
+  
+  "3Y" = read_excel("ycy price.xlsx", sheet = "germany yr3") %>%
+    mutate(Date = as.Date(Date)) %>%
+    select(Date, `Last Price`) %>%
+    arrange(Date) %>%
+    na.omit(),
+  
+  "5Y" = read_excel("ycy price.xlsx", sheet = "germany yr5") %>%
+    mutate(Date = as.Date(Date)) %>%
+    select(Date, `Last Price`) %>%
+    arrange(Date) %>%
+    na.omit()
+)
+
+contract_length <- c("1Y" = 12, "3Y" = 36, "5Y" = 60)
+
+generation <- 500
+
+discount_rate <- 0.02 / 12
+
+n_simu <- 1000 
+
+n_mo <- 120
+
+npv_forward_without_carbon <- list()
+
+set.seed(42)
+
+simu_price2 <- matrix(rnorm(n_mo * n_simu, mean = 80, sd = 10), nrow = n_mo, ncol = n_simu)
+
+for (contract in names(contract_length)) {
+  
+  contract_months <- contract_length[[contract]] 
+  
+  electricity_price <- germany_forward[[contract]]$`Last Price` 
+  
+  contract_rev <- matrix(rep(electricity_price[1:contract_months], n_simu), 
+                         nrow = contract_months, 
+                         ncol = n_simu, 
+                         byrow = TRUE) * generation
+
+  post_contract_prices <- simu_price2[(contract_months + 1):n_mo, ]
+  
+  post_contract_rev <- post_contract_prices * generation
+
+  total_rev_without_carbon <- rbind(contract_rev, post_contract_rev)
+  
+  npv_forward_without_carbon[[contract]] <- colSums(total_rev_without_carbon / ((1 + discount_rate) ^ (1:n_mo)))
+
+  print(paste("NPV calculated for contract:", contract))
+}
+
+par(mfrow=c(1,3))
+for (contract in names(contract_length)) {
+  hist(unlist(npv_forward_without_carbon[[contract]]),
+       breaks = 50,
+       main = paste0(contract, " Forward (No Carbon)"),
+       xlab = "NPV",
+       col = "lightblue")
+}
+```
+
+```{r}
+#with carbon credit
+
+carbon_forward <- list(
+  "1Y" = read_excel("ycy price.xlsx", sheet = "MOZ25") %>% select(Date...1, `Last Price`) %>% na.omit(),
+  "3Y" = read_excel("ycy price.xlsx", sheet = "MOZ27") %>% select(Date, `Last Price`) %>% na.omit(),
+  "5Y" = read_excel("ycy price.xlsx", sheet = "MOZ29") %>% select(Date, `Last Price`) %>% na.omit()
+)
+
+allo_rates <- c(0, 0.2, 0.5, 0.8)
+
+npv_forward_with_carbon <- list()
+
+for (contract in names(contract_length)) {
+  contract_months <- contract_length[[contract]]
+  
+  electricity_price <- germany_forward[[contract]]$`Last Price`
+  
+  carbon_price <- carbon_forward[[contract]]$`Last Price`
+  
+  contract_rev <- matrix(rep(electricity_price, n_simu), 
+                         nrow = contract_months, 
+                         ncol = n_simu, 
+                         byrow = TRUE) * generation
+  
+  post_contract_prices <- simu_price2[(contract_months + 1):n_mo, ]
+  
+  post_contract_rev <- post_contract_prices * generation
+  
+  for (alloc in allo_rates) {
+    
+    contract_carbon_rev <- matrix(rep(carbon_price * alloc, n_simu),
+                                  nrow = contract_months, ncol = n_simu, byrow = TRUE) * generation
+    
+    post_contract_carbon_rev <- post_contract_prices * (alloc * carbon_price) * generation
+    
+    total_rev_with_carbon <- rbind(contract_rev + contract_carbon_rev, 
+                                   post_contract_rev +post_contract_carbon_rev)
+    
+    npv_forward_with_carbon[[paste0(contract, "_alloc_", alloc)]] <- 
+      colSums(total_rev_with_carbon / ((1 + discount_rate) ^ (1:n_mo)))
+  }
+}
+
+for (alloc in allo_rates) {
+  
+  par(mfrow=c(1,3))
+  
+  for (contract in names(contract_length)) {
+    hist(unlist(npv_forward_with_carbon[[paste0(contract, "_alloc_", alloc)]]),
+         breaks = 50,
+         main = paste0(contract, " Forward (Alloc ", alloc, ")"),
+         xlab = "NPV",
+         col = "lightgreen")
+  }
+}
+```
+
+#Spot vs. Forward
+
+```{r}
+library(ggplot2)
+
+library(dplyr)
+
+plot_confidence_interval <- function(data_list, title) {
+  df <- data.frame(
+    Contract = rep(names(data_list), each = 2),
+    Type = rep(c("Lower", "Upper"), times = length(data_list)),
+    NPV = unlist(lapply(data_list, function(x) quantile(x, probs = c(0.025, 0.975))))
+  )
+  
+  ggplot(df, aes(x = Contract, y = NPV, color = Contract)) +
+    geom_point(size = 3) +
+    geom_line(aes(group = Contract), linewidth = 1) +
+    labs(title = title, y = "NPV", x = "Contract Type") +
+    theme_minimal() +
+    theme(legend.position = "none")
+}
+
+#without carbon credit
+
+without_carbon_data <- list(
+  "Spot" = npv_electr,
+  "1Y Forward" = npv_forward_without_carbon[["1Y"]],
+  "3Y Forward" = npv_forward_without_carbon[["3Y"]],
+  "5Y Forward" = npv_forward_without_carbon[["5Y"]]
+)
+
+p1<-plot_confidence_interval(without_carbon_data, "Spot vs. Forward (Without Carbon Credit)")
+
+print(p1)
+```
+
+```{r}
+str(npv_electr)
+str(npv_with_carbon_filtered)
+
+```
+
+```{r}
+#with carbon credit for spot
+
+spot_carbon_data <- list(
+  "Spot (Without Carbon)" = npv_electr, 
+  "Spot (With Carbon)" = unlist(npv_with_carbon_filtered)
+)
+
+p2 <- plot_confidence_interval(spot_carbon_data, 
+                               "Spot Price: With vs. Without Carbon Credit")
+
+print(p2)
+```
+
+```{r}
+#different allocation rates have impact on forward
+
+allocation_plots <- list()
+
+for (alloc in allo_rates) {
+  alloc_data <- list(
+    "1Y" = npv_forward_with_carbon[[paste0("1Y_alloc_", alloc)]],
+    "3Y" = npv_forward_with_carbon[[paste0("3Y_alloc_", alloc)]],
+    "5Y" = npv_forward_with_carbon[[paste0("5Y_alloc_", alloc)]]
+  )
+  
+  allocation_plots[[paste0("Alloc_", alloc)]] <- plot_confidence_interval(alloc_data, paste("Allocation Rate =", alloc))
+}
+
+print(allocation_plots)
+```
+
